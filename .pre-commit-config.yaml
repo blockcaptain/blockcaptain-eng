@@ -19,10 +19,10 @@ repos:
         require_serial: true
         language: python
         types: [python]
-      - id: mypy
-        name: mypy
-        entry: mypy
-        language: python
+      - id: pyright
+        name: pyright
+        entry: pyright
+        language: node
         types: [python]
-        exclude: setup.py
+        pass_filenames: false
         require_serial: true

@@ -29,7 +29,7 @@ def image() -> None:
 
 
 @cli.command()
-def dev(name: Optional[str] = None, storage_pool: Optional[str] = "default") -> None:
+def dev(name: Optional[str] = None, storage_pool: str = "default") -> None:
     client = pylxd.Client()
     name = ensure_name(name)
     import_image_if_not_exists(client)
@@ -38,7 +38,10 @@ def dev(name: Optional[str] = None, storage_pool: Optional[str] = "default") -> 
 
 
 @cli.command()
-def test(storage_pool: Optional[str] = "default", package: Optional[Path] = None, keep: bool = False) -> None:
+def test(storage_pool: str = "default", package: Optional[Path] = None, keep: bool = False) -> None:
+    if package is None:
+        package = Path("./target/debian/blockcaptain_0.1.0_amd64.deb")
+
     client = pylxd.Client()
     name = "test-" + ensure_name(None)
     import_image_if_not_exists(client)
@@ -68,7 +71,7 @@ def test(storage_pool: Optional[str] = "default", package: Optional[Path] = None
 
 
 @cli.command()
-def clean(name: str, storage_pool: Optional[str] = "default") -> None:
+def clean(name: str, storage_pool: str = "default") -> None:
     client = pylxd.Client()
 
     destroy_vm(client, storage_pool, name)
