@@ -1,7 +1,12 @@
-import typer
+import logging
+
+from rich.logging import RichHandler
+
 from blkcapteng.commands import cli
 
-def main():
+
+def main() -> None:
+    logging.basicConfig(level="NOTSET", format="%(message)s", datefmt="[%X]", handlers=[RichHandler()])
     cli(prog_name="blkcapteng")
 
 
