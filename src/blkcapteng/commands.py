@@ -10,7 +10,8 @@ from pylxd.exceptions import NotFound
 from pylxd.models import Image, Instance
 
 cli = typer.Typer()
-logger = logging.getLogger()
+logger = logging.getLogger("blkcapt")
+logger.setLevel(logging.DEBUG)
 
 VM_IMAGE_ALIAS = "ubuntu-blkcapt"
 DATA_DISKS = 3
@@ -45,35 +46,61 @@ def test(storage_pool: str = "default", package: Optional[Path] = None, keep: bo
     client = pylxd.Client()
     name = "test-" + ensure_name(None)
     import_image_if_not_exists(client)
-    logging.info(f"creating vm {name}")
+    logger.info(f"creating vm {name}")
     instance = create_vm(client, storage_pool, name)
-    logging.info("starting vm")
+    logger.info("starting vm")
     instance.start(wait=True)
-    logging.info("waiting for guest agent")
+    logger.info("waiting for guest agent")
     wait_for_agent(instance)
-    logging.info("installing package")
+    logger.info("installing package")
     install_package(instance, package)
-    logging.info("configuring")
-    blkcapt(instance, ["pool", "create", "/dev/sdb", "/dev/sdc"])
-    blkcapt(instance, ["dataset", "create", "default", "mydata"])
-    blkcapt(instance, ["pool", "create", "-n", "backup", "/dev/sdd"])
-    blkcapt(instance, ["container", "create", "backup", "mybackup"])
-    # set clock ??
-    logging.info("starting service")
-    instance_run(instance, ["systemctl", "start", "blockcaptain"])
-    time.sleep(3)
-    logging.info("stopping service")
+    logger.info("copying restic")
+    copy_file(instance, package.parent / "restic", Path("/usr/local/bin/restic"))
+    instance_run(instance, ["chmod", "755", "/usr/local/bin/restic"])
+    logger.info("configuring")
+
+    instance_run_script(
+        instance,
+        """
+    set -e
+    DATASET_PRUNE_CRON="3 * * * * * *"
+    CONTAINER_PRUNE_CRON="3 0/2 * * * * *"
+    blkcapt pool create -n primary --force /dev/sdb /dev/sdc
+    blkcapt dataset create primary mydata -f 10sec --prune-schedule "${DATASET_PRUNE_CRON}"
+    blkcapt pool create -n backup --force /dev/sdd
+    blkcapt container create backup mybackupbtr --prune-schedule "${CONTAINER_PRUNE_CRON}"
+    mkdir /mnt/backup/restic-repo
+    RESTIC_PASSWORD=1234 restic init --repo /mnt/backup/restic-repo
+    blkcapt restic attach -n mybackuprst --custom /mnt/backup/restic-repo -e RESTIC_PASSWORD=1234 \
+        --prune-schedule "${CONTAINER_PRUNE_CRON}"
+    blkcapt sync create mydata mybackupbtr
+    blkcapt sync create mydata mybackuprst
+    """,
+    )
+    logger.info("starting service")
+    instance_run_script(
+        instance,
+        """
+    set -e
+    timedatectl set-ntp false
+    sleep 1
+    timedatectl set-time "$(date -d "+1day" "+%Y-%m-%d") 00:00"
+    systemctl start blockcaptain
+    """,
+    )
+    logger.info("running test cycle")
+    time.sleep(187)
+    logger.info("stopping service")
     instance_run(instance, ["systemctl", "stop", "blockcaptain"])
     # analyze final state ??
     if not keep:
-        logging.info("destroying vm")
+        logger.info("destroying vm")
         destroy_vm(client, storage_pool, instance.name)
 
 
 @cli.command()
 def clean(name: str, storage_pool: str = "default") -> None:
     client = pylxd.Client()
-
     destroy_vm(client, storage_pool, name)
 
 
@@ -83,8 +110,12 @@ def ensure_name(name: Optional[str]) -> str:
 
 def install_package(instance: Instance, package: Path) -> None:
     target_path = Path("/tmp") / package.name
-    instance.files.put(str(target_path), package.read_bytes())
+    copy_file(instance, package, target_path)
     instance_run(instance, ["apt-get", "install", "-yq", "--reinstall", str(target_path)])
+
+
+def copy_file(instance: Instance, source: Path, destination: Path) -> None:
+    instance.files.put(str(destination), source.read_bytes())
 
 
 def instance_run(instance: Instance, command: List[str]) -> str:
@@ -94,8 +125,8 @@ def instance_run(instance: Instance, command: List[str]) -> str:
     return result.stdout
 
 
-def blkcapt(instance: Instance, command: List[str]) -> str:
-    return instance_run(instance, ["blkcapt"] + command)
+def instance_run_script(instance: Instance, script: str) -> str:
+    return instance_run(instance, ["bash", "-c", script])
 
 
 def import_image(client: pylxd.Client) -> Image:

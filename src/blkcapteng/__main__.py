@@ -1,4 +1,5 @@
 import logging
+import warnings
 
 from rich.logging import RichHandler
 
@@ -6,7 +7,8 @@ from blkcapteng.commands import cli
 
 
 def main() -> None:
-    logging.basicConfig(level="NOTSET", format="%(message)s", datefmt="[%X]", handlers=[RichHandler()])
+    warnings.filterwarnings("ignore", module="pylxd")
+    logging.basicConfig(level=logging.WARNING, format="%(message)s", datefmt="[%X]", handlers=[RichHandler()])
     cli(prog_name="blkcapteng")
 
 
