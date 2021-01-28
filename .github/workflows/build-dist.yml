@@ -2,7 +2,7 @@ name: Build Distributable
 
 on:
   push:
-    branches: [master]
+    branches: [main]
 
 jobs:
   build:
