@@ -1,4 +1,5 @@
 import logging
+import subprocess
 import time
 from pathlib import Path
 from typing import List, Optional
@@ -30,24 +31,28 @@ def image() -> None:
 
 
 @cli.command()
-def dev(name: Optional[str] = None, storage_pool: str = "default") -> None:
+def dev(name: Optional[str] = None, storage_pool: str = "default", container: bool = False) -> None:
     client = pylxd.Client()
     name = ensure_name(name)
-    import_image_if_not_exists(client)
-    instance = create_vm(client, storage_pool, name)
+    if not container:
+        import_image_if_not_exists(client)
+    instance = create_instance(client, storage_pool, name, container)
     instance.start()
 
 
 @cli.command()
-def test(storage_pool: str = "default", package: Optional[Path] = None, keep: bool = False) -> None:
+def test(
+    storage_pool: str = "default", package: Optional[Path] = None, keep: bool = False, container: bool = False
+) -> None:
     if package is None:
         package = Path("./target/debian/blockcaptain_0.1.0_amd64.deb")
 
     client = pylxd.Client()
     name = "test-" + ensure_name(None)
-    import_image_if_not_exists(client)
+    if not container:
+        import_image_if_not_exists(client)
     logger.info(f"creating vm {name}")
-    instance = create_vm(client, storage_pool, name)
+    instance = create_instance(client, storage_pool, name, container)
     logger.info("starting vm")
     instance.start(wait=True)
     logger.info("waiting for guest agent")
@@ -62,31 +67,34 @@ def test(storage_pool: str = "default", package: Optional[Path] = None, keep: bo
     instance_run_script(
         instance,
         """
-    set -e
-    DATASET_PRUNE_CRON="3 * * * * * *"
-    CONTAINER_PRUNE_CRON="3 0/2 * * * * *"
-    blkcapt pool create -n primary --force /dev/sdb /dev/sdc
-    blkcapt dataset create primary mydata -f 10sec --prune-schedule "${DATASET_PRUNE_CRON}"
-    blkcapt pool create -n backup --force /dev/sdd
-    blkcapt container create backup mybackupbtr --prune-schedule "${CONTAINER_PRUNE_CRON}"
-    mkdir /mnt/backup/restic-repo
-    RESTIC_PASSWORD=1234 restic init --repo /mnt/backup/restic-repo
-    blkcapt restic attach -n mybackuprst --custom /mnt/backup/restic-repo -e RESTIC_PASSWORD=1234 \
-        --prune-schedule "${CONTAINER_PRUNE_CRON}"
-    blkcapt sync create mydata mybackupbtr
-    blkcapt sync create mydata mybackuprst
-    """,
+        set -e
+        DATASET_PRUNE_CRON="3 * * * * * *"
+        CONTAINER_PRUNE_CRON="3 0/2 * * * * *"
+        blkcapt pool create -n primary --force /dev/sdb /dev/sdc
+        blkcapt dataset create primary mydata -f 10sec --prune-schedule "${DATASET_PRUNE_CRON}"
+        blkcapt pool create -n backup --force /dev/sdd
+        blkcapt container create backup mybackupbtr --prune-schedule "${CONTAINER_PRUNE_CRON}"
+        mkdir /mnt/backup/restic-repo
+        RESTIC_PASSWORD=1234 restic init --repo /mnt/backup/restic-repo
+        blkcapt restic attach -n mybackuprst --custom /mnt/backup/restic-repo -e RESTIC_PASSWORD=1234 \
+            --prune-schedule "${CONTAINER_PRUNE_CRON}"
+        blkcapt sync create mydata mybackupbtr
+        blkcapt sync create mydata mybackuprst
+        """,
     )
     logger.info("starting service")
     instance_run_script(
         instance,
         """
-    set -e
-    timedatectl set-ntp false
-    sleep 1
-    timedatectl set-time "$(date -d "+1day" "+%Y-%m-%d") 00:00"
-    systemctl start blockcaptain
-    """,
+        set -e
+        SEC=$(date "+%S")
+        if [[ $SEC -ne 0 ]]; then
+            WAIT_SEC=$((60 - SEC))
+            echo "Waiting ${WAIT_SEC}..."
+            sleep $WAIT_SEC
+        fi
+        systemctl start blockcaptain
+        """,
     )
     logger.info("running test cycle")
     time.sleep(187)
@@ -149,36 +157,67 @@ def get_local_image(client: pylxd.Client) -> Image:
     return client.images.get_by_alias(VM_IMAGE_ALIAS)
 
 
-def create_vm(client: pylxd.Client, storage_pool: str, name: str) -> Instance:
+def create_instance(client: pylxd.Client, storage_pool: str, name: str, container: bool = False) -> Instance:
     try:
         get_local_image(client)
     except NotFound:
         print("image does not exist, trying to import...")
         import_image(client)
 
-    pool = client.storage_pools.get(storage_pool)
-    for i in range(1, DATA_DISKS + 1):
-        config = {
-            "config": {"size": "128MiB"},
-            "name": f"{name}-disk{i}",
-            "type": "custom",
-            "content_type": "block",
-        }
-        pool.volumes.create(config, wait=True)
+    if container:
+        CHAR_BEGIN = 98
+        loop_devices = [
+            create_loop_device(create_loop_file(Path(f"/tmp/loopback-{name}-{i}.img")))
+            for i in range(1, DATA_DISKS + 1)
+        ]
 
-    device_config = {
-        f"{name}-disk{i}": {"pool": "default", "source": f"{name}-disk{i}", "type": "disk"}
-        for i in range(1, DATA_DISKS + 1)
-    }
+        def dev_name(x: int) -> str:
+            return f"sd{chr(CHAR_BEGIN + x)}"
+
+        device_config = {
+            dev_name(i): {"source": f"{str(device)}", "path": f"/dev/{dev_name(i)}", "type": "unix-block"}
+            for i, device in enumerate(loop_devices)
+        }
+        device_config["btrfs-control"] = {"source": "/dev/btrfs-control", "type": "unix-char"}
+        source = {
+            "type": "image",
+            "alias": "20.04",
+            "server": "https://cloud-images.ubuntu.com/releases",
+            "protocol": "simplestreams",
+            "mode": "pull",
+        }
+        type = "container"
+        inner_config = {"security.privileged": "true", "raw.apparmor": "mount,"}
+    else:
+        pool = client.storage_pools.get(storage_pool)
+        for i in range(1, DATA_DISKS + 1):
+            config = {
+                "config": {"size": "128MiB"},
+                "name": f"{name}-disk{i}",
+                "type": "custom",
+                "content_type": "block",
+            }
+            pool.volumes.create(config, wait=True)
+
+        device_config = {
+            f"{name}-disk{i}": {"pool": "default", "source": f"{name}-disk{i}", "type": "disk"}
+            for i in range(1, DATA_DISKS + 1)
+        }
+        source = {"type": "image", "alias": VM_IMAGE_ALIAS}
+        type = "virtual-machine"
+        inner_config = {}
+
     config = {
         "architecture": "x86_64",
         "devices": device_config,
         "ephemeral": False,
         "profiles": ["default"],
         "name": name,
-        "type": "virtual-machine",
-        "source": {"type": "image", "alias": VM_IMAGE_ALIAS},
+        "type": type,
+        "source": source,
+        "config": inner_config,
     }
+
     return client.instances.create(config, wait=True)
 
 
@@ -225,3 +264,17 @@ def wait_for_agent(instance: Instance) -> None:
         time.sleep(1)
 
     raise Exception("timed out waiting for agent")
+
+
+def create_loop_device(file: Path) -> Path:
+    device = subprocess.check_output(["losetup", "--show", "-f", str(file)], text=True).strip()
+    return Path(device)
+
+
+def create_loop_file(file: Path) -> Path:
+    subprocess.check_call(
+        ["dd", "if=/dev/zero", f"of={str(file)}", "bs=8M", "count=32"],
+        stderr=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+    )
+    return file
