@@ -23,9 +23,9 @@ def image() -> None:
     client = pylxd.Client()
     try:
         get_local_image(client)
-        print("image exists, trying to update...")
+        logger.info("image exists, trying to update...")
     except NotFound:
-        print("image does not exist, trying to import...")
+        logger.info("image does not exist, trying to import...")
 
     import_image(client)
 
@@ -149,7 +149,7 @@ def import_image_if_not_exists(client: pylxd.Client) -> Image:
     try:
         return get_local_image(client)
     except NotFound:
-        print("image does not exist, trying to import...")
+        logger.info("image does not exist, trying to import...")
         return import_image(client)
 
 
@@ -158,12 +158,6 @@ def get_local_image(client: pylxd.Client) -> Image:
 
 
 def create_instance(client: pylxd.Client, storage_pool: str, name: str, container: bool = False) -> Instance:
-    try:
-        get_local_image(client)
-    except NotFound:
-        print("image does not exist, trying to import...")
-        import_image(client)
-
     if container:
         CHAR_BEGIN = 98
         loop_devices = [
