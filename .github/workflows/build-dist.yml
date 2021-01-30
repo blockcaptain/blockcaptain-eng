@@ -6,25 +6,24 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
-
+    runs-on: ubuntu-20.04
     steps:
       - uses: actions/checkout@v2
-      # - name: Set up Python
-      #   uses: actions/setup-python@v2
-      #   with:
-      #     python-version: 3.8
+      - name: Set up Python
+        uses: actions/setup-python@v2
+        with:
+          python-version: 3.8
       - name: Install dependencies
         run: |
-          sudo python3 -m pip install --upgrade pip
-          sudo pip3 install flake8 setuptools
+          python3 -m pip install --upgrade pip
+          pip3 install flake8 setuptools
       - name: Lint with flake8
         run: |
-          which flake8
           flake8 src
       - name: Build
         run: |
           which pip3
+          pip3 --version
           ./eng/build_zipapp.sh
       - name: Create Release
         id: create_release
