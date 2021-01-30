@@ -16,10 +16,11 @@ jobs:
           python-version: 3.8
       - name: Install dependencies
         run: |
-          sudo python -m pip install --upgrade pip
-          sudo pip install flake8
+          sudo python3 -m pip install --upgrade pip
+          sudo pip3 install flake8
       - name: Lint with flake8
         run: |
+          which flake8
           flake8 src
       - name: Build
         run: |
