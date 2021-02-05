@@ -71,15 +71,17 @@ def test(
         DATASET_PRUNE_CRON="3 * * * * * *"
         CONTAINER_PRUNE_CRON="3 0/2 * * * * *"
         blkcapt pool create -n primary --force /dev/sdb /dev/sdc
-        blkcapt dataset create primary mydata -f 10sec --prune-schedule "${DATASET_PRUNE_CRON}"
+        blkcapt dataset create primary mydata -m 3 -s 10sec --prune-schedule "${DATASET_PRUNE_CRON}"
         blkcapt pool create -n backup --force /dev/sdd
-        blkcapt container create backup mybackupbtr --prune-schedule "${CONTAINER_PRUNE_CRON}"
+        blkcapt container create backup mybackupbtr -m 2 -i 20s:1 2x30s:2 \
+            --prune-schedule "${CONTAINER_PRUNE_CRON}"
         mkdir /mnt/backup/restic-repo
         RESTIC_PASSWORD=1234 restic init --repo /mnt/backup/restic-repo
         blkcapt restic attach -n mybackuprst --custom /mnt/backup/restic-repo -e RESTIC_PASSWORD=1234 \
-            --prune-schedule "${CONTAINER_PRUNE_CRON}"
+             -m 1 -i 30s:2 2x1m:1 --prune-schedule "${CONTAINER_PRUNE_CRON}"
         blkcapt sync create mydata mybackupbtr
         blkcapt sync create mydata mybackuprst
+        blkcapt service config -l trace
         """,
     )
     logger.info("starting service")
@@ -101,6 +103,17 @@ def test(
     logger.info("stopping service")
     instance_run(instance, ["systemctl", "stop", "blockcaptain"])
     # analyze final state ??
+    logger.info("checking log")
+    instance_run_script(
+        instance,
+        """
+        set -e
+        if [[ $(journalctl -q -p warning -n 1 -u blockcaptain) ]]; then
+            journalctl -p info -n 500 -u blockcaptain
+            exit 1
+        fi
+        """,
+    )
     if not keep:
         logger.info("destroying vm")
         destroy_vm(client, storage_pool, instance.name)
@@ -129,7 +142,7 @@ def copy_file(instance: Instance, source: Path, destination: Path) -> None:
 def instance_run(instance: Instance, command: List[str]) -> str:
     result = instance.execute(command)
     if result.exit_code != 0:
-        raise Exception(f"command failed ({result.exit_code}): {result.stderr}")
+        raise Exception(f"command failed ({result.exit_code}): {result.stdout} {result.stderr}")
     return result.stdout
 
 
