@@ -89,19 +89,32 @@ def test(
         instance,
         """
         set -e
+        mkdir /tmp/bce
         SEC=$(date "+%S")
         if [[ $SEC -ne 0 ]]; then
             WAIT_SEC=$((60 - SEC))
             echo "Waiting ${WAIT_SEC}..."
             sleep $WAIT_SEC
         fi
+        date +%s > /tmp/bce/tstart
         systemctl start blockcaptain
         """,
     )
     logger.info("running test cycle")
     time.sleep(187)
     logger.info("stopping service")
-    instance_run(instance, ["systemctl", "stop", "blockcaptain"])
+    instance_run_script(
+        instance,
+        """
+        set -e
+        systemctl stop blockcaptain
+        journalctl -u blockcaptain -o json | gzip > /tmp/log.json.gz
+        """,
+    )
+    logger.info("pulling log")
+    log_data = get_file(instance, Path("/tmp/log.json.gz"))
+    with open(f"{name}.log.json.gz", "wb") as file:
+        file.write(log_data)
     # analyze final state ??
     logger.info("checking log")
     instance_run_script(
@@ -137,6 +150,10 @@ def install_package(instance: Instance, package: Path) -> None:
 
 def copy_file(instance: Instance, source: Path, destination: Path) -> None:
     instance.files.put(str(destination), source.read_bytes())
+
+
+def get_file(instance: Instance, source: Path) -> bytes:
+    return instance.files.get(str(source))
 
 
 def instance_run(instance: Instance, command: List[str]) -> str:
