@@ -10,6 +10,8 @@ import typer
 from pylxd.exceptions import NotFound
 from pylxd.models import Image, Instance
 
+from blkcapteng.validation import validate
+
 cli = typer.Typer()
 logger = logging.getLogger("blkcapt")
 logger.setLevel(logging.DEBUG)
@@ -57,8 +59,15 @@ def test(
     instance.start(wait=True)
     logger.info("waiting for guest agent")
     wait_for_agent(instance)
-    logger.info("installing package")
+    logger.info("installing packages")
     install_package(instance, package)
+    instance_run_script(
+        instance,
+        """
+        set -e
+        apt-get install -y jq
+        """,
+    )
     logger.info("copying restic")
     copy_file(instance, package.parent / "restic", Path("/usr/local/bin/restic"))
     instance_run(instance, ["chmod", "755", "/usr/local/bin/restic"])
@@ -68,8 +77,8 @@ def test(
         instance,
         """
         set -e
-        DATASET_PRUNE_CRON="3 * * * * * *"
-        CONTAINER_PRUNE_CRON="3 0/2 * * * * *"
+        DATASET_PRUNE_CRON="6 * * * * * *"
+        CONTAINER_PRUNE_CRON="6 * * * * * *"
         blkcapt pool create -n primary --force /dev/sdb /dev/sdc
         blkcapt dataset create primary mydata -m 3 -s 10sec --prune-schedule "${DATASET_PRUNE_CRON}"
         blkcapt pool create -n backup --force /dev/sdd
@@ -85,9 +94,24 @@ def test(
         """,
     )
     logger.info("starting service")
+
+    FUNC_CAPTURE_STATE = """
+        capture_state() {
+            local name=$1
+            btrfs sub list -r /mnt/primary | awk '{print $NF}' | awk '{print "mydata:" $0}' \
+                >> /tmp/bce/${name}.state
+            btrfs sub list -r /mnt/backup | awk '{print $NF}' | awk '{print "mybackupbtr:" $0}' \
+                >> /tmp/bce/${name}.state
+            RESTIC_PASSWORD=1234 restic snapshots -r /mnt/backup/restic-repo --json | jq -r '.[].tags[] \
+                | select(contains("ts="))' | awk '{print "mybackuprst:" $0}' >> /tmp/bce/${name}.state
+        }
+    """
+
     instance_run_script(
         instance,
-        """
+        FUNC_CAPTURE_STATE
+        + """
+        export -f capture_state
         set -e
         mkdir /tmp/bce
         SEC=$(date "+%S")
@@ -97,17 +121,31 @@ def test(
             sleep $WAIT_SEC
         fi
         date +%s > /tmp/bce/tstart
+        nohup bash -c "sleep 188; systemctl stop blockcaptain" &>/dev/null &
+        nohup bash -c "sleep 63; capture_state first" &>/dev/null &
+        nohup bash -c "sleep 123; capture_state second" &>/dev/null &
+        nohup bash -c "sleep 183; capture_state third" &>/dev/null &
+
         systemctl start blockcaptain
+        sleep 1
         """,
     )
     logger.info("running test cycle")
     time.sleep(187)
-    logger.info("stopping service")
+    logger.info("wait for service stop")
     instance_run_script(
         instance,
         """
         set -e
-        systemctl stop blockcaptain
+        i=0
+        while systemctl is-active blockcaptain && [[ $i -lt 30 ]]; do
+            sleep 1
+            i=$((i + 1))
+        done
+        if systemctl is-active blockcaptain; then
+            echo Service stop timed out.
+            exit 1
+        fi
         journalctl -u blockcaptain -o json | gzip > /tmp/log.json.gz
         """,
     )
@@ -115,7 +153,28 @@ def test(
     log_data = get_file(instance, Path("/tmp/log.json.gz"))
     with open(f"{name}.log.json.gz", "wb") as file:
         file.write(log_data)
-    # analyze final state ??
+
+    logger.info("getting snapshot states")
+    instance_run_script(
+        instance,
+        FUNC_CAPTURE_STATE
+        + """
+        set -e
+        capture_state final
+        """,
+    )
+
+    base = int(get_file(instance, Path("/tmp/bce/tstart")).decode())
+    first = get_file(instance, Path("/tmp/bce/first.state")).decode()
+    second = get_file(instance, Path("/tmp/bce/second.state")).decode()
+    third = get_file(instance, Path("/tmp/bce/third.state")).decode()
+    final = get_file(instance, Path("/tmp/bce/final.state")).decode()
+
+    logger.info("validating snapshot states")
+    if not validate(first, second, third, final, base):
+        logger.error("snapshot validation failed")
+        raise typer.Exit(code=1)
+
     logger.info("checking log")
     instance_run_script(
         instance,
