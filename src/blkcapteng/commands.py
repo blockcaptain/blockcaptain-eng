@@ -65,6 +65,7 @@ def test(
         instance,
         """
         set -e
+        apt-get update
         apt-get install -y jq
         """,
     )
