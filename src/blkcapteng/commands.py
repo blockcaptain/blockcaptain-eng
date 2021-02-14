@@ -66,7 +66,7 @@ def test(
         """
         set -e
         apt-get update
-        apt-get install -y jq
+        apt-get install -y jq bc
         """,
     )
     logger.info("copying restic")
@@ -92,6 +92,8 @@ def test(
         blkcapt sync create mydata mybackupbtr
         blkcapt sync create mydata mybackuprst
         blkcapt service config -l trace
+
+        echo "test data" > /mnt/primary/mydata/data.txt
         """,
     )
     logger.info("starting service")
@@ -115,19 +117,24 @@ def test(
         export -f capture_state
         set -e
         mkdir /tmp/bce
-        SEC=$(date "+%S")
-        if [[ $SEC -ne 0 ]]; then
-            WAIT_SEC=$((60 - SEC))
-            echo "Waiting ${WAIT_SEC}..."
-            sleep $WAIT_SEC
-        fi
-        date +%s > /tmp/bce/tstart
+
+        date > /dev/null
+        nohup true &>/dev/null
+        bc -v > /dev/null
+        sleep 0
+
+        TARGET=$(date -d "$(date -d "1 minute 1 second" "+%Y-%m-%d %H:%M:00")" "+%s")
+        CURRENT=$(date "+%s.%N")
+        SLEEP_DURATION=$(bc <<< "$TARGET - $CURRENT")
+        sleep $SLEEP_DURATION
         nohup bash -c "sleep 188; systemctl stop blockcaptain" &>/dev/null &
         nohup bash -c "sleep 63; capture_state first" &>/dev/null &
         nohup bash -c "sleep 123; capture_state second" &>/dev/null &
         nohup bash -c "sleep 183; capture_state third" &>/dev/null &
 
         systemctl start blockcaptain
+
+        echo "$TARGET" > /tmp/bce/tstart
         sleep 1
         """,
     )
@@ -175,6 +182,27 @@ def test(
     if not validate(first, second, third, final, base):
         logger.error("snapshot validation failed")
         raise typer.Exit(code=1)
+
+    logger.info("validating snapshot data")
+    instance_run_script(
+        instance,
+        """
+        set -e
+        if [[ $(cat /mnt/backup/mybackupbtr/*/*/data.txt | uniq) != "test data" ]]; then
+            echo "btrfs data mismatch"
+            exit 1
+        fi
+
+        export RESTIC_PASSWORD=1234
+        RESTIC_BIND_PATH=$(restic -r /mnt/backup/restic-repo snapshots --json \
+            | jq -r '.[].paths[]' | head -n 1)
+        if [[ $(restic -r /mnt/backup/restic-repo/ dump --quiet latest \
+            "${RESTIC_BIND_PATH}/data.txt") != "test data" ]]; then
+            echo "restic data mismatch"
+            exit 2
+        fi
+        """,
+    )
 
     logger.info("checking log")
     instance_run_script(
